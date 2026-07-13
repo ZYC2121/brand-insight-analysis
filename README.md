@@ -3,6 +3,8 @@
 > **AI-Native 数据分析工具** | 上传任意 CSV → 自动分析 → 一键生成报告
 >
 > 使用 Claude Agent 完成全流程代码生成，构建可复用的数据分析工作流
+>
+> 🚀 **在线演示**: https://brand-insight-analysis-qbc3lcsznbqjbfgfdnzbjc.streamlit.app/
 
 ---
 
