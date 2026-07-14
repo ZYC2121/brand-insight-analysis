@@ -391,7 +391,12 @@ class AutoAnalyzer:
 
                 # ===== 事后检验 =====
                 if test_result['significant']:
-                    unique_vals = sorted(self.df[cat_col].dropna().unique())
+                    # 防止 mixed types 导致 sorted() 报错
+                    raw_vals = list(self.df[cat_col].dropna().unique())
+                    try:
+                        unique_vals = sorted(raw_vals, key=lambda x: (type(x).__name__, str(x)))
+                    except TypeError:
+                        unique_vals = raw_vals  # 放弃排序，保持原始顺序
                     posthoc_groups, posthoc_labels = [], []
                     for v in unique_vals:
                         g = self.df[self.df[cat_col] == v][num_col].dropna()
@@ -495,9 +500,10 @@ class AutoAnalyzer:
                 # 生成箱线图
                 if test_result['significant']:
                     fig, ax = plt.subplots(figsize=(8, 4))
+                    safe_vals = sorted(self._safe_unique(cat_col))
                     plot_data = [self.df[self.df[cat_col] == v][num_col].dropna()
-                                for v in sorted(self.df[cat_col].unique())]
-                    bp = ax.boxplot(plot_data, labels=sorted(self.df[cat_col].unique()),
+                                for v in safe_vals]
+                    bp = ax.boxplot(plot_data, labels=safe_vals,
                                     patch_artist=True, widths=0.5)
                     for patch in bp['boxes']:
                         patch.set_facecolor('lightcoral' if p_val < 0.05 else 'lightgray')
@@ -542,6 +548,14 @@ class AutoAnalyzer:
         return {'results': results, 'charts': charts,
                 'n_significant': sum(1 for r in results if r['significant']),
                 'n_significant_bonferroni': n_sig_bonferroni}
+
+    def _safe_unique(self, col):
+        """获取列的唯一值列表，安全处理 mixed types（避免 sorted() 报错）。"""
+        raw = list(self.df[col].dropna().unique())
+        try:
+            return sorted(raw, key=lambda x: (type(x).__name__, str(x)))
+        except TypeError:
+            return raw  # mixed types 无法排序，保持原始顺序
 
     # ======================== 6. 客户聚类 ========================
     def clustering(self):
