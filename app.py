@@ -203,15 +203,15 @@ else:
                     if missing_info:
                         st.markdown("**Missing Values**")
                         st.dataframe(pd.DataFrame([
-                            {'Column': k, 'Missing': v['count'], 'Rate': f'{v[\"percentage\"]}%',
+                            {'Column': k, 'Missing': v['count'], 'Rate': str(v['percentage']) + '%',
                              'Severity': v['severity']}
                             for k, v in sorted(missing_info.items(), key=lambda x: -x[1]['percentage'])
                         ]), use_container_width=True, hide_index=True)
                     if outlier_info:
                         st.markdown("**Outliers (IQR method)**")
                         st.dataframe(pd.DataFrame([
-                            {'Column': k, 'Count': v['count'], 'Rate': f'{v[\"percentage\"]}%',
-                             'Range': f'{v[\"lower_bound\"]} ~ {v[\"upper_bound\"]}', 'Severity': v['severity']}
+                            {'Column': k, 'Count': v['count'], 'Rate': str(v['percentage']) + '%',
+                             'Range': str(v['lower_bound']) + ' ~ ' + str(v['upper_bound']), 'Severity': v['severity']}
                             for k, v in sorted(outlier_info.items(), key=lambda x: -x[1]['percentage'])
                         ]), use_container_width=True, hide_index=True)
 
