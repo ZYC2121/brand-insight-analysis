@@ -115,9 +115,11 @@ else:
             analyzer = AutoAnalyzer(tmp_path, output_dir=output_dir,
                                    max_categories=max_categories, top_n=top_n)
 
-            # 阶段1: 加载
+            # 阶段1: 加载 + 数据质量
             progress.progress(10, text="Detecting column types...")
             meta = analyzer.load_and_detect()
+            dq = analyzer.data_quality()
+            progress.progress(20, text="Checking data quality...")
 
             # 阶段2: 描述统计
             progress.progress(30, text="Computing descriptive statistics...")
@@ -185,6 +187,34 @@ else:
 
             st.caption(f"Duplicated rows: {meta['duplicated_rows']}")
 
+            # 数据质量警告
+            dq_meta = meta.get('data_quality', {})
+            if dq_meta:
+                missing_info = dq_meta.get('missing', {})
+                outlier_info = dq_meta.get('outliers', {})
+                high_miss = {k: v for k, v in missing_info.items() if v['severity'] == 'high'}
+                high_out = {k: v for k, v in outlier_info.items() if v['severity'] == 'high'}
+                if high_miss or high_out:
+                    st.warning(
+                        f"⚠️ Data Quality: {len(high_miss)} column(s) with high missing rate, "
+                        f"{len(high_out)} column(s) with high outlier rate"
+                    )
+                with st.expander("Data Quality Details"):
+                    if missing_info:
+                        st.markdown("**Missing Values**")
+                        st.dataframe(pd.DataFrame([
+                            {'Column': k, 'Missing': v['count'], 'Rate': f'{v[\"percentage\"]}%',
+                             'Severity': v['severity']}
+                            for k, v in sorted(missing_info.items(), key=lambda x: -x[1]['percentage'])
+                        ]), use_container_width=True, hide_index=True)
+                    if outlier_info:
+                        st.markdown("**Outliers (IQR method)**")
+                        st.dataframe(pd.DataFrame([
+                            {'Column': k, 'Count': v['count'], 'Rate': f'{v[\"percentage\"]}%',
+                             'Range': f'{v[\"lower_bound\"]} ~ {v[\"upper_bound\"]}', 'Severity': v['severity']}
+                            for k, v in sorted(outlier_info.items(), key=lambda x: -x[1]['percentage'])
+                        ]), use_container_width=True, hide_index=True)
+
             # 数据预览
             with st.expander("Data Preview (first 20 rows)"):
                 st.dataframe(analyzer.df.head(20), use_container_width=True)
@@ -225,19 +255,31 @@ else:
 
         # Tab 3: Correlation
         with tabs[2]:
-            st.subheader("Correlation Analysis")
+            st.subheader("Correlation Analysis — Pearson + Spearman")
             if corr:
                 chart_path = os.path.join(output_dir, corr['chart_file'])
                 if os.path.exists(chart_path):
                     st.image(chart_path, use_container_width=True)
 
                 if corr.get('high_correlations'):
-                    st.markdown("**Significant Correlations (|r| > 0.3)**")
-                    corr_df = pd.DataFrame(corr['high_correlations'])
-                    corr_df.columns = ['Variable Pair', 'Correlation']
-                    st.dataframe(corr_df, use_container_width=True, hide_index=True)
+                    st.markdown("**Significant Pearson Correlations (|r| > 0.3)**")
+                    corr_rows = []
+                    for hc in corr['high_correlations'][:10]:
+                        corr_rows.append({
+                            'Variable Pair': hc['pair'],
+                            'Pearson': hc['pearson'],
+                            'Spearman': hc.get('spearman', 'N/A')
+                        })
+                    st.dataframe(pd.DataFrame(corr_rows), use_container_width=True, hide_index=True)
                 else:
                     st.info("No strong correlations found between numerical variables.")
+
+                if corr.get('nonlinear_hints'):
+                    st.warning("**⚠️ Nonlinear Relationship Detected** — Pearson vs Spearman differ by >0.2:")
+                    nl_rows = [{'Variable Pair': nh['pair'], 'Pearson': nh['pearson'],
+                               'Spearman': nh['spearman'], 'Difference': nh['difference']}
+                              for nh in corr['nonlinear_hints'][:5]]
+                    st.dataframe(pd.DataFrame(nl_rows), use_container_width=True, hide_index=True)
             else:
                 st.info("Not enough numerical columns for correlation analysis (need >= 2).")
 
@@ -373,6 +415,12 @@ else:
                 st.markdown(f"**K = {clust['k_optimal']}** clusters identified from "
                            f"{len(clust['cluster_features'])} features: "
                            f"{', '.join(clust['cluster_features'])}")
+
+                if clust.get('silhouette_score'):
+                    sil = clust['silhouette_score']
+                    sil_q = clust.get('silhouette_quality', '')
+                    st.metric("Silhouette Score", f"{sil:.4f}",
+                             help=f"Quality: {sil_q}. >0.5 good, >0.25 fair, <0.25 poor")
 
                 sizes = pd.DataFrame([{
                     'Cluster': k, 'Size': v,

@@ -40,15 +40,47 @@ def generate_report(analysis_results, output_path='output/analysis_report.md'):
     w(f'- **重复行**: {meta["duplicated_rows"]}')
     w('')
 
-    # 缺失值情况
-    missing_any = {k: v for k, v in meta['missing_values'].items() if v > 0}
-    if missing_any:
-        w('### 缺失值情况')
-        w('| 列名 | 缺失数 |')
-        w('|------|--------|')
-        for k, v in missing_any.items():
-            w(f'| {k} | {v} |')
-        w('')
+    # 数据质量报告
+    dq = meta.get('data_quality', {})
+    if dq:
+        missing_info = dq.get('missing', {})
+        outlier_info = dq.get('outliers', {})
+
+        has_missing = any(v['severity'] in ('high', 'medium') for v in missing_info.values())
+        has_outliers = any(v['severity'] in ('high', 'medium') for v in outlier_info.values())
+
+        if has_missing or has_outliers or missing_info or outlier_info:
+            w('### ⚠️ 数据质量报告')
+            w('')
+
+        if missing_info:
+            high_miss = {k: v for k, v in missing_info.items() if v['severity'] == 'high'}
+            med_miss = {k: v for k, v in missing_info.items() if v['severity'] == 'medium'}
+            if high_miss or med_miss:
+                w('**缺失值警告:**')
+                w('| 列名 | 缺失数 | 缺失率 | 严重程度 |')
+                w('|------|--------|--------|----------|')
+                for k, v in {**high_miss, **med_miss}.items():
+                    flag = '🔴 高' if v['severity'] == 'high' else '🟡 中'
+                    w(f'| {k} | {v["count"]} | {v["percentage"]}% | {flag} |')
+                w('')
+
+        if outlier_info:
+            high_out = {k: v for k, v in outlier_info.items() if v['severity'] == 'high'}
+            med_out = {k: v for k, v in outlier_info.items() if v['severity'] == 'medium'}
+            if high_out or med_out:
+                w('**异常值警告 (IQR 方法):**')
+                w('| 列名 | 异常值数 | 占比 | 正常范围 | 严重程度 |')
+                w('|------|----------|------|----------|----------|')
+                for k, v in {**high_out, **med_out}.items():
+                    flag = '🔴 高' if v['severity'] == 'high' else '🟡 中'
+                    w(f'| {k} | {v["count"]} | {v["percentage"]}% | '
+                      f'{v["lower_bound"]} ~ {v["upper_bound"]} | {flag} |')
+                w('')
+
+        if not (has_missing or has_outliers):
+            w('> ✅ 未发现严重的数据质量问题。')
+            w('')
 
     # ===== 2. 描述统计 =====
     if desc:
@@ -75,15 +107,28 @@ def generate_report(analysis_results, output_path='output/analysis_report.md'):
         w('---')
         w('## 三、相关性分析')
         w('')
+        w('> 同时计算 **Pearson**（线性相关）和 **Spearman**（单调相关），两者差异大提示可能存在非线性关系。')
+        w('')
         w(f'![相关性热力图]({corr["chart_file"]})')
         w('')
-        w('### 显著相关变量对 (|r| > 0.3)')
-        w('| 变量对 | 相关系数 |')
-        w('|--------|----------|')
-        for hc in corr['high_correlations'][:10]:
-            direction = ':small_red_triangle: 正相关' if hc['correlation'] > 0 else ':small_red_triangle_down: 负相关'
-            w(f'| {hc["pair"]} | {hc["correlation"]:.3f} {direction} |')
-        w('')
+        if corr.get('high_correlations'):
+            w('### 显著相关变量对 (|Pearson| > 0.3)')
+            w('| 变量对 | Pearson | Spearman |')
+            w('|--------|---------|----------|')
+            for hc in corr['high_correlations'][:10]:
+                p_dir = ':small_red_triangle:' if hc['pearson'] > 0 else ':small_red_triangle_down:'
+                s_dir = ':small_red_triangle:' if hc['spearman'] > 0 else ':small_red_triangle_down:'
+                w(f'| {hc["pair"]} | {p_dir} {hc["pearson"]:.3f} | {s_dir} {hc["spearman"]:.3f} |')
+            w('')
+
+        if corr.get('nonlinear_hints'):
+            w('### ⚠️ 非线性关系提示')
+            w('以下变量对的 Pearson 和 Spearman 差异较大 (>0.2)，提示可能存在**非线性单调关系**：')
+            w('| 变量对 | Pearson | Spearman | 差异 |')
+            w('|--------|---------|----------|------|')
+            for nh in corr['nonlinear_hints'][:8]:
+                w(f'| {nh["pair"]} | {nh["pearson"]:.3f} | {nh["spearman"]:.3f} | {nh["difference"]:.3f} |')
+            w('')
 
     # ===== 4. 分组对比分析 =====
     if grp and grp.get('results'):
@@ -109,11 +154,14 @@ def generate_report(analysis_results, output_path='output/analysis_report.md'):
         if bonf_results:
             w(f'### ✅ 通过 Bonferroni 校正的显著发现 ({len(bonf_results)} 项)')
             w('')
-            w('| 数值变量 | 分组变量 | 检验方法 | p值 | 效应量 | Bonferroni |')
-            w('|----------|----------|----------|-----|--------|------------|')
+            es_name = bonf_results[0].get('effect_size_name', 'Effect Size') if bonf_results else 'Effect Size'
+            w(f'| 数值变量 | 分组变量 | 检验方法 | p值 | {es_name} | 解读 | Bonferroni |')
+            w('|----------|----------|----------|-----|--------|------|------------|')
             for r in bonf_results:
+                es_val = r.get('effect_size', 0)
+                es_interp = r.get('effect_size_interpretation', '')
                 w(f'| {r["numeric"]} | {r["categorical"]} | {r["method"]} | {r["p_value"]:.4f} | '
-                  f'{r["effect_size"]:.3f} | ✅ 通过 |')
+                  f'{es_val:.3f} | {es_interp} | ✅ 通过 |')
             w('')
             for r in bonf_results[:5]:
                 w(f'**{r["numeric"]} by {r["categorical"]}** (p={r["p_value"]:.4f})')
@@ -201,6 +249,12 @@ def generate_report(analysis_results, output_path='output/analysis_report.md'):
         w('')
         w(f'使用 K-Means 算法（K={clust["k_optimal"]}）对 {len(clust["cluster_features"])} 个特征进行聚类。')
         w(f'')
+        if clust.get('silhouette_score'):
+            sil = clust['silhouette_score']
+            sil_q = clust.get('silhouette_quality', '')
+            w(f'- **轮廓系数 (Silhouette Score)**: {sil:.4f}（{sil_q}）')
+            w(f'  > 轮廓系数范围 [-1, 1]，越接近 1 聚类质量越好。>0.5 良好，>0.25 可接受，<0.25 聚类结构较弱。')
+        w(f'')
         w(f'![聚类分析]({clust["chart_file"]})')
         w('')
         w('### 聚类画像')
@@ -278,6 +332,78 @@ def generate_report(analysis_results, output_path='output/analysis_report.md'):
 
     for f_text in findings:
         w(f_text)
+        w('')
+
+    # ===== 8. 业务建议 =====
+    w('---')
+    w('## 八、策略建议')
+    w('')
+    w('> 基于上述分析结果，自动生成以下可操作的业务建议。')
+    w('')
+    recommendations = []
+
+    # 基于驱动力分析
+    if driver and driver.get('results'):
+        for d_result in driver['results']:
+            if d_result.get('model_significant'):
+                top3 = d_result['drivers'][:3]
+                top3_names = [d['feature'] for d in top3 if d['significant']]
+                if top3_names:
+                    target = d_result['target']
+                    recommendations.append(
+                        f'- **聚焦 {target} 优化**: 优先关注 **{top3_names[0]}** '
+                        f'(Beta={top3[0]["coefficient"]:.3f})，其驱动力远超其他因素。'
+                        f'建议将资源配置向该方向倾斜。'
+                    )
+
+    # 基于分组对比
+    if grp and grp.get('results'):
+        bonf_sig = [r for r in grp['results'] if r.get('significant_bonferroni', False)]
+        for r in bonf_sig[:2]:
+            top_group = max(r['group_means'], key=r['group_means'].get)
+            bottom_group = min(r['group_means'], key=r['group_means'].get)
+            recommendations.append(
+                f'- **差异化策略**: **{r["categorical"]}** 对 **{r["numeric"]}** 有显著影响 '
+                f'({r["method"]}, p={r["p_value"]:.4f})。'
+                f'"{top_group}" 组表现最优，"{bottom_group}" 组有最大提升空间，'
+                f'建议对后者进行专项干预。'
+            )
+            # 事后检验
+            if r.get('posthoc_pairs'):
+                top_pair = r['posthoc_pairs'][0]
+                recommendations.append(
+                    f'  事后检验确认: {top_pair["group1"]} vs {top_pair["group2"]} 差异显著 '
+                    f'(p={top_pair["p_value"]:.4f}, {top_pair.get("method", "")})。'
+                )
+
+    # 基于聚类
+    if clust:
+        sizes = clust['cluster_sizes']
+        sil = clust.get('silhouette_score', 0)
+        if len(sizes) >= 2 and sil > 0.25:
+            largest_k = max(sizes, key=sizes.get)
+            smallest_k = min(sizes, key=sizes.get)
+            recommendations.append(
+                f'- **分群运营**: 识别出 {clust["k_optimal"]} 个差异化客群（轮廓系数={sil:.3f}）。'
+                f'最大客群 Cluster {largest_k} 共 {sizes[largest_k]} 人，建议做规模化触达；'
+                f'最小客群 Cluster {smallest_k} 共 {sizes[smallest_k]} 人，可能是高价值小众群体，建议深度运营。'
+            )
+
+    # 基于相关性非线性提示
+    if corr and corr.get('nonlinear_hints'):
+        top_nl = corr['nonlinear_hints'][0]
+        recommendations.append(
+            f'- **非线性关系值得关注**: **{top_nl["pair"]}** 的 Pearson ({top_nl["pearson"]:.3f}) '
+            f'与 Spearman ({top_nl["spearman"]:.3f}) 差异达 {top_nl["difference"]:.3f}，'
+            f'提示两者之间可能存在非线性关系，建议进一步探索（如分段分析或转换变量）。'
+        )
+
+    if recommendations:
+        for rec in recommendations[:8]:
+            w(rec)
+            w('')
+    else:
+        w('> 当前数据中未检测到足够显著的信号来生成具体策略建议。建议扩大样本量或补充更多特征维度的数据。')
         w('')
 
     w('---')

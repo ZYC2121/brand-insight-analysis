@@ -17,6 +17,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.cluster import KMeans
 from sklearn.decomposition import PCA
 from sklearn.linear_model import LinearRegression
+from sklearn.metrics import silhouette_score
 from datetime import datetime
 import os, warnings, json
 warnings.filterwarnings('ignore')
@@ -126,6 +127,44 @@ class AutoAnalyzer:
 
         return self.meta
 
+    # ======================== 1.5 数据质量检测 ========================
+    def data_quality(self):
+        """检测缺失值和异常值，返回数据质量报告"""
+        dq = {'missing': {}, 'outliers': {}}
+
+        # --- 缺失值检测 ---
+        for col in self.df.columns:
+            n_miss = int(self.df[col].isnull().sum())
+            if n_miss > 0:
+                pct = n_miss / len(self.df) * 100
+                dq['missing'][col] = {
+                    'count': n_miss,
+                    'percentage': round(pct, 1),
+                    'severity': 'high' if pct > 20 else 'medium' if pct > 5 else 'low'
+                }
+
+        # --- 异常值检测 (IQR方法，仅对数值列) ---
+        for col in self.meta['numeric']:
+            series = self.df[col].dropna()
+            Q1 = series.quantile(0.25)
+            Q3 = series.quantile(0.75)
+            IQR = Q3 - Q1
+            lower = Q1 - 1.5 * IQR
+            upper = Q3 + 1.5 * IQR
+            n_outliers = int(((series < lower) | (series > upper)).sum())
+            if n_outliers > 0:
+                pct = n_outliers / len(series) * 100
+                dq['outliers'][col] = {
+                    'count': n_outliers,
+                    'percentage': round(pct, 1),
+                    'lower_bound': round(float(lower), 2),
+                    'upper_bound': round(float(upper), 2),
+                    'severity': 'high' if pct > 10 else 'medium' if pct > 3 else 'low'
+                }
+
+        self.meta['data_quality'] = dq
+        return dq
+
     # ======================== 2. 描述统计分析 ========================
     def descriptive_stats(self):
         """数值型变量描述统计"""
@@ -202,36 +241,76 @@ class AutoAnalyzer:
 
     # ======================== 4. 相关性分析 ========================
     def correlation_analysis(self):
-        """数值变量相关性矩阵"""
+        """数值变量相关性矩阵 — Pearson + Spearman 双方法"""
         numeric_cols = self.meta['numeric']
         if len(numeric_cols) < 2:
             return None
 
-        corr = self.df[numeric_cols].corr()
-        high_corr = []
-        for i in range(len(corr.columns)):
-            for j in range(i+1, len(corr.columns)):
-                val = corr.iloc[i, j]
-                if abs(val) > 0.3:
-                    high_corr.append({
-                        'pair': f'{corr.columns[i]} × {corr.columns[j]}',
-                        'correlation': round(val, 3)
-                    })
-        high_corr.sort(key=lambda x: abs(x['correlation']), reverse=True)
+        pearson = self.df[numeric_cols].corr(method='pearson')
+        spearman = self.df[numeric_cols].corr(method='spearman')
 
-        # 热力图
-        fig, ax = plt.subplots(figsize=(max(6, len(numeric_cols)*0.8),
-                                        max(5, len(numeric_cols)*0.7)))
-        mask = np.triu(np.ones_like(corr, dtype=bool))
-        sns.heatmap(corr, mask=mask, annot=True, fmt='.2f', cmap='RdBu_r',
-                    center=0, square=True, linewidths=0.5, vmin=-1, vmax=1, ax=ax)
-        ax.set_title('Correlation Matrix', fontsize=14, fontweight='bold')
+        # 高相关对（综合两种方法）
+        high_corr = []
+        pearson_high = []
+        for i in range(len(pearson.columns)):
+            for j in range(i+1, len(pearson.columns)):
+                p_val = pearson.iloc[i, j]
+                s_val = spearman.iloc[i, j]
+                pair = f'{pearson.columns[i]} × {pearson.columns[j]}'
+                if abs(p_val) > 0.3 or abs(s_val) > 0.3:
+                    high_corr.append({
+                        'pair': pair,
+                        'pearson': round(p_val, 3),
+                        'spearman': round(s_val, 3),
+                        'correlation': round(p_val, 3)  # backward compat
+                    })
+                if abs(p_val) > 0.3:
+                    pearson_high.append({
+                        'pair': pair,
+                        'pearson': round(p_val, 3),
+                        'spearman': round(s_val, 3)
+                    })
+
+        high_corr.sort(key=lambda x: abs(x['pearson']), reverse=True)
+        pearson_high.sort(key=lambda x: abs(x['pearson']), reverse=True)
+
+        # 检测 Pearson 和 Spearman 差异大的变量对（提示非线性关系）
+        nonlinear_hints = []
+        for i in range(len(pearson.columns)):
+            for j in range(i+1, len(pearson.columns)):
+                diff = abs(abs(pearson.iloc[i, j]) - abs(spearman.iloc[i, j]))
+                if diff > 0.2:  # 差异超过 0.2 提示可能存在非线性关系
+                    nonlinear_hints.append({
+                        'pair': f'{pearson.columns[i]} × {pearson.columns[j]}',
+                        'pearson': round(pearson.iloc[i, j], 3),
+                        'spearman': round(spearman.iloc[i, j], 3),
+                        'difference': round(diff, 3)
+                    })
+        nonlinear_hints.sort(key=lambda x: x['difference'], reverse=True)
+
+        # Pearson 热力图
+        fig, axes = plt.subplots(1, 2, figsize=(max(12, len(numeric_cols)*1.6),
+                                                 max(5.5, len(numeric_cols)*0.7)))
+        mask = np.triu(np.ones_like(pearson, dtype=bool))
+        sns.heatmap(pearson, mask=mask, annot=True, fmt='.2f', cmap='RdBu_r',
+                    center=0, square=True, linewidths=0.5, vmin=-1, vmax=1, ax=axes[0])
+        axes[0].set_title('Pearson Correlation', fontsize=13, fontweight='bold')
+        sns.heatmap(spearman, mask=mask, annot=True, fmt='.2f', cmap='RdBu_r',
+                    center=0, square=True, linewidths=0.5, vmin=-1, vmax=1, ax=axes[1])
+        axes[1].set_title('Spearman Correlation', fontsize=13, fontweight='bold')
         plt.tight_layout()
         fname = 'correlation_heatmap.png'
         plt.savefig(os.path.join(self.output_dir, fname), dpi=150, bbox_inches='tight')
         plt.close()
 
-        return {'corr_matrix': corr, 'high_correlations': high_corr, 'chart_file': fname}
+        return {
+            'pearson_matrix': pearson, 'spearman_matrix': spearman,
+            'corr_matrix': pearson,  # backward compat
+            'high_correlations': pearson_high,
+            'all_high_correlations': high_corr,
+            'nonlinear_hints': nonlinear_hints,
+            'chart_file': fname
+        }
 
     # ======================== 5. 分组对比分析 (t检验/ANOVA) ========================
     def group_comparison(self):
@@ -367,9 +446,50 @@ class AutoAnalyzer:
                 # 组均值
                 group_means = self.df.groupby(cat_col)[num_col].mean().round(2).to_dict()
                 test_result['group_means'] = {k: float(v) for k, v in group_means.items()}
-                test_result['effect_size'] = round(
-                    (max(group_means.values()) - min(group_means.values())) / self.df[num_col].std(), 3
-                )
+
+                # ===== 标准化效应量 =====
+                n_total = sum(len(g) for g in groups)
+                if n_cats == 2:
+                    # Cohen's d
+                    n1, n2 = len(groups[0]), len(groups[1])
+                    var1, var2 = groups[0].var(), groups[1].var()
+                    pooled_std = np.sqrt(((n1-1)*var1 + (n2-1)*var2) / (n1+n2-2))
+                    if pooled_std > 0:
+                        d_val = abs(groups[0].mean() - groups[1].mean()) / pooled_std
+                    else:
+                        d_val = 0.0
+                    test_result['effect_size'] = round(d_val, 3)
+                    test_result['effect_size_name'] = "Cohen's d"
+                    test_result['effect_size_interpretation'] = (
+                        'large' if d_val > 0.8 else 'medium' if d_val > 0.5 else 'small'
+                    )
+                else:
+                    if test_result['method'] in ('ANOVA', 'Kruskal-Wallis'):
+                        grand_mean = np.concatenate([g for g in groups]).mean()
+                        if test_result['method'] == 'ANOVA':
+                            ss_between = sum(len(g) * (g.mean() - grand_mean)**2 for g in groups)
+                            ss_total = sum(((g - grand_mean)**2).sum() for g in groups)
+                            eta_sq = ss_between / ss_total if ss_total > 0 else 0.0
+                            test_result['effect_size_name'] = 'η² (eta-squared)'
+                        else:
+                            # Kruskal-Wallis: η²_H approximation
+                            H = test_result['test_statistic']
+                            eta_sq = H / (n_total - 1) if n_total > 1 else 0.0
+                            test_result['effect_size_name'] = 'η²_H (Kruskal-Wallis)'
+                        test_result['effect_size'] = round(eta_sq, 3)
+                        test_result['effect_size_interpretation'] = (
+                            'large' if eta_sq > 0.14 else 'medium' if eta_sq > 0.06 else 'small'
+                        )
+                    else:
+                        # Mann-Whitney U: r = Z / sqrt(N)
+                        z_val = abs(stats.norm.ppf(max(p_val / 2, 1e-10)))
+                        r_val = z_val / np.sqrt(n_total)
+                        test_result['effect_size'] = round(r_val, 3)
+                        test_result['effect_size_name'] = 'r (rank-biserial)'
+                        test_result['effect_size_interpretation'] = (
+                            'large' if r_val > 0.5 else 'medium' if r_val > 0.3 else 'small'
+                        )
+
                 results.append(test_result)
 
                 # 生成箱线图
@@ -439,25 +559,44 @@ class AutoAnalyzer:
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
 
-        # 肘部法则
+        # 肘部法则 + 轮廓系数
         inertias = []
+        silhouettes = []
         K_range = range(1, min(11, len(X)))
         for k in K_range:
             km = KMeans(n_clusters=k, random_state=42, n_init=10)
-            km.fit(X_scaled)
+            labels = km.fit_predict(X_scaled)
             inertias.append(km.inertia_)
+            if k >= 2:
+                silhouettes.append(silhouette_score(X_scaled, labels))
 
-        # 自动选K：找肘部
+        # 自动选K：肘部法则 + 轮廓系数交叉验证
         if len(inertias) >= 4:
             diffs = [inertias[i] - inertias[i+1] for i in range(len(inertias)-1)]
             diffs2 = [diffs[i] - diffs[i+1] for i in range(len(diffs)-1)]
-            k_optimal = diffs2.index(max(diffs2)) + 2  # +2 because of diff chain
-            k_optimal = max(2, min(5, k_optimal))
+            k_elbow = diffs2.index(max(diffs2)) + 2
         else:
-            k_optimal = 3
+            k_elbow = 3
+
+        # 找出轮廓系数最高的 K
+        if silhouettes:
+            k_silhouette = silhouettes.index(max(silhouettes)) + 2  # +2 because K_range starts at 2
+        else:
+            k_silhouette = k_elbow
+
+        # 综合选择：优先轮廓系数，但如果肘部 K 更大且轮廓系数差距小(<0.05)，选更大的
+        best_sil = max(silhouettes) if silhouettes else 0
+        sil_at_elbow = silhouettes[k_elbow - 2] if silhouettes and k_elbow >= 2 and k_elbow - 2 < len(silhouettes) else 0
+        if k_elbow > k_silhouette and best_sil - sil_at_elbow < 0.05:
+            k_optimal = k_elbow
+        else:
+            k_optimal = k_silhouette
+
+        k_optimal = max(2, min(6, k_optimal))
 
         km = KMeans(n_clusters=k_optimal, random_state=42, n_init=10)
         clusters = km.fit_predict(X_scaled)
+        final_silhouette = silhouette_score(X_scaled, clusters) if k_optimal >= 2 else 0
 
         # 聚类画像
         cluster_df = X.copy()
@@ -478,24 +617,39 @@ class AutoAnalyzer:
         axes[0].set_ylabel(f'PC2 ({pca.explained_variance_ratio_[1]*100:.1f}%)')
         plt.colorbar(scatter, ax=axes[0], label='Cluster')
 
-        # 肘部法则
-        axes[1].plot(K_range, inertias, 'bo-', markersize=8, linewidth=2)
-        axes[1].axvline(x=k_optimal, color='red', linestyle='--', label=f'Optimal K={k_optimal}')
-        axes[1].set_title('Elbow Method', fontsize=13, fontweight='bold')
-        axes[1].set_xlabel('K')
-        axes[1].set_ylabel('Inertia')
-        axes[1].legend()
+        # 肘部法则 + 轮廓系数
+        ax2 = axes[1]
+        ax2.plot(list(K_range), inertias, 'bo-', markersize=8, linewidth=2, label='Inertia')
+        ax2.axvline(x=k_optimal, color='red', linestyle='--', label=f'Optimal K={k_optimal}')
+        ax2.set_title('Elbow Method + Silhouette', fontsize=13, fontweight='bold')
+        ax2.set_xlabel('K')
+        ax2.set_ylabel('Inertia', color='blue')
+        ax2.legend(loc='upper right')
+
+        if silhouettes:
+            ax3 = ax2.twinx()
+            ax3.plot(list(K_range)[1:], silhouettes, 'rs-', markersize=6, linewidth=1.5, label='Silhouette')
+            ax3.set_ylabel('Silhouette Score', color='red')
+            ax3.legend(loc='lower right')
 
         plt.tight_layout()
         fname = 'clustering.png'
         plt.savefig(os.path.join(self.output_dir, fname), dpi=150, bbox_inches='tight')
         plt.close()
 
+        # 聚类质量评估
+        silhouette_quality = 'good' if final_silhouette > 0.5 else 'fair' if final_silhouette > 0.25 else 'poor'
+
         # 各聚类均值（用于报告）
         cluster_summary = cluster_df.groupby('Cluster').mean().round(2).to_dict()
 
         return {
             'k_optimal': k_optimal,
+            'k_elbow': k_elbow,
+            'k_silhouette': k_silhouette,
+            'silhouette_score': round(final_silhouette, 4),
+            'silhouette_quality': silhouette_quality,
+            'all_silhouettes': [round(s, 4) for s in silhouettes],
             'cluster_sizes': pd.Series(clusters).value_counts().to_dict(),
             'cluster_means': cluster_summary,
             'cluster_features': cluster_cols,
@@ -665,6 +819,12 @@ class AutoAnalyzer:
         print(f"  Detected: {len(meta['numeric'])} numeric, {len(meta['categorical'])} categorical, "
               f"{len(meta['datetime'])} datetime, {len(meta['id'])} id columns")
         print(f"  Rows: {meta['total_rows']}, Duplicates: {meta['duplicated_rows']}")
+
+        print("[AutoAnalyzer] Running data quality checks...")
+        dq = self.data_quality()
+        n_miss = len(dq['missing'])
+        n_out = len(dq['outliers'])
+        print(f"  Missing value issues: {n_miss} columns, Outlier issues: {n_out} columns")
 
         results = {'meta': meta}
 
