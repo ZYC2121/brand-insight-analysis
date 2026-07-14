@@ -500,7 +500,7 @@ class AutoAnalyzer:
                 # 生成箱线图
                 if test_result['significant']:
                     fig, ax = plt.subplots(figsize=(8, 4))
-                    safe_vals = sorted(self._safe_unique(cat_col))
+                    safe_vals = self._safe_unique(cat_col)
                     plot_data = [self.df[self.df[cat_col] == v][num_col].dropna()
                                 for v in safe_vals]
                     bp = ax.boxplot(plot_data, labels=safe_vals,
@@ -570,6 +570,8 @@ class AutoAnalyzer:
             return None
 
         X = self.df[cluster_cols].dropna()
+        if len(X) < 3:
+            return None
         scaler = StandardScaler()
         X_scaled = scaler.fit_transform(X)
 
