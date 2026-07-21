@@ -503,8 +503,8 @@ class AutoAnalyzer:
                     safe_vals = self._safe_unique(cat_col)
                     plot_data = [self.df[self.df[cat_col] == v][num_col].dropna()
                                 for v in safe_vals]
-                    bp = ax.boxplot(plot_data, labels=safe_vals,
-                                    patch_artist=True, widths=0.5)
+                    bp = ax.boxplot(plot_data, patch_artist=True, widths=0.5)
+                    ax.set_xticklabels(safe_vals, rotation=30, ha='right')
                     for patch in bp['boxes']:
                         patch.set_facecolor('lightcoral' if p_val < 0.05 else 'lightgray')
                     ax.set_title(f'{num_col} by {cat_col}\n({test_result["method"]}, p={p_val:.4f})',
